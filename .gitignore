@@ -1,0 +1,5 @@
+# Local Vencord development checkout (upstream clone, not part of this project)
+vencord/
+
+# Logs
+*.log
