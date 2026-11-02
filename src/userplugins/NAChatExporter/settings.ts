@@ -7,22 +7,44 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
-import { ExportButton } from "./components/ExportButton";
+type LifecycleHooks = {
+    onArchivingToggled?: (enabled: boolean) => void;
+    onStorageRootChanged?: () => void;
+};
+
+let hooks: LifecycleHooks = {};
+
+export function registerLifecycleHooks(next: LifecycleHooks): void {
+    hooks = next;
+}
 
 export const settings = definePluginSettings({
-    exportJson: {
-        type: OptionType.COMPONENT,
-        component: ExportButton
+    archivingEnabled: {
+        type: OptionType.BOOLEAN,
+        description: "Automatically archive every accessible conversation (messages, edits, deletions, reactions) to disk",
+        default: true,
+        onChange: value => hooks.onArchivingToggled?.(Boolean(value))
     },
-    defaultFormat: {
-        type: OptionType.SELECT,
-        description: "Default export format preselected in the export dialog",
-        options: [
-            { label: "JSON (structured, lossless)", value: "json", default: true },
-            { label: "HTML (readable transcript)", value: "html" },
-            { label: "CSV (spreadsheet table)", value: "csv" },
-            { label: "TXT (plain text)", value: "txt" }
-        ]
+    storageRoot: {
+        type: OptionType.STRING,
+        description: "Folder where the archive is written, e.g. D:/NA-CHAT-EXPORTER",
+        default: "D:/NA-CHAT-EXPORTER",
+        onChange: () => hooks.onStorageRootChanged?.()
+    },
+    backfillHistory: {
+        type: OptionType.BOOLEAN,
+        description: "Recover message history that is still accessible via Discord's API",
+        default: true
+    },
+    downloadAttachments: {
+        type: OptionType.BOOLEAN,
+        description: "Download attachments from Discord's CDN into the archive (references are always kept)",
+        default: true
+    },
+    maintainCsv: {
+        type: OptionType.BOOLEAN,
+        description: "Also maintain CSV exports (TXT and JSON are always maintained)",
+        default: false
     },
     pageDelayMs: {
         type: OptionType.SLIDER,
@@ -33,7 +55,7 @@ export const settings = definePluginSettings({
     },
     maxMessages: {
         type: OptionType.NUMBER,
-        description: "Safety cap for messages per export (0 = no limit)",
+        description: "History cap per conversation during recovery (0 = no limit)",
         default: 0,
         isValid: value =>
             typeof value === "number" && Number.isInteger(value) && value >= 0
