@@ -18,6 +18,7 @@ import {
 } from "./core/live";
 import {
     handleArchivingToggled,
+    handleGuildSelectionChanged,
     handleStorageRootChanged,
     requestDiscover,
     startArchiving,
@@ -28,7 +29,7 @@ import { logger } from "./utils/logger";
 
 export default definePlugin({
     name: "NAChatExporter",
-    description: "Automatically archives every accessible conversation (messages, edits, deletions, reactions, attachments) to a local folder with TXT/JSON/CSV exports",
+    description: "Archives only servers explicitly selected by the user, plus direct messages, to a local folder with TXT/JSON/CSV exports",
     authors: [{ name: "NA Tools", id: 0n }],
     searchTerms: ["export", "chat", "messages", "download", "backup", "archive"],
     tags: ["Utility", "Chat"],
@@ -56,7 +57,8 @@ export default definePlugin({
     start() {
         registerLifecycleHooks({
             onArchivingToggled: handleArchivingToggled,
-            onStorageRootChanged: handleStorageRootChanged
+            onStorageRootChanged: handleStorageRootChanged,
+            onGuildSelectionChanged: handleGuildSelectionChanged
         });
         if (settings.store.archivingEnabled)
             void startArchiving();
