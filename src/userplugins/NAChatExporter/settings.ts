@@ -21,6 +21,10 @@ export function registerLifecycleHooks(next: LifecycleHooks): void {
     hooks = next;
 }
 
+export function notifyGuildSelectionChanged(): void {
+    hooks.onGuildSelectionChanged?.();
+}
+
 export const settings = definePluginSettings({
     selectedGuildIds: {
         type: OptionType.CUSTOM,
