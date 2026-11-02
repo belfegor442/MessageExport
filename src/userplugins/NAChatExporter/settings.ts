@@ -21,8 +21,8 @@ export function registerLifecycleHooks(next: LifecycleHooks): void {
 export const settings = definePluginSettings({
     archivingEnabled: {
         type: OptionType.BOOLEAN,
-        description: "Automatically archive every accessible conversation (messages, edits, deletions, reactions) to disk",
-        default: true,
+        description: "Opt in to automatically archive accessible conversations locally. Archives may contain sensitive messages; review the destination and retention before enabling.",
+        default: false,
         onChange: value => hooks.onArchivingToggled?.(Boolean(value))
     },
     storageRoot: {
@@ -38,8 +38,8 @@ export const settings = definePluginSettings({
     },
     downloadAttachments: {
         type: OptionType.BOOLEAN,
-        description: "Download attachments from Discord's CDN into the archive (references are always kept)",
-        default: true
+        description: "Opt in to download attachments from Discord's CDN. References are kept when downloads are disabled.",
+        default: false
     },
     maintainCsv: {
         type: OptionType.BOOLEAN,
