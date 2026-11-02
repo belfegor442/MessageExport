@@ -130,6 +130,11 @@ function hasBackfillInFlight(conversation: StoredConversation): boolean {
 }
 
 async function flushTxt(channelId: string): Promise<void> {
+    if (!await isChannelInArchiveScope(channelId)) {
+        txtDirty.delete(channelId);
+        pendingMarkers.delete(channelId);
+        return;
+    }
     const conversation = await getConversation(channelId);
     if (!conversation) {
         pendingMarkers.delete(channelId);
@@ -207,6 +212,10 @@ async function drainTxt(): Promise<void> {
 }
 
 async function flushJson(channelId: string): Promise<void> {
+    if (!await isChannelInArchiveScope(channelId)) {
+        jsonDirty.delete(channelId);
+        return;
+    }
     const conversation = await getConversation(channelId);
     if (!conversation) return;
     // Perf deferral only: JSON is a full dump of the source of truth, but rebuilding
