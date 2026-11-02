@@ -23,12 +23,15 @@ export async function ensureLayout(_event: IpcMainInvokeEvent, root: string, dir
 }
 
 export async function append(_event: IpcMainInvokeEvent, root: string, relPath: string, data: string): Promise<void> {
-    await appendFile(safeJoin(root, relPath), data, "utf8");
+    const target = safeJoin(root, relPath);
+    await mkdir(dirname(target), { recursive: true });
+    await appendFile(target, data, "utf8");
 }
 
 export async function writeAtomic(_event: IpcMainInvokeEvent, root: string, relPath: string, data: string): Promise<void> {
     const target = safeJoin(root, relPath);
     const tmp = `${target}.tmp`;
+    await mkdir(dirname(target), { recursive: true });
     await writeFile(tmp, data, "utf8");
     await fsRename(tmp, target);
 }
