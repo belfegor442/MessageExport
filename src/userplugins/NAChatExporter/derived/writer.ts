@@ -18,6 +18,7 @@ import {
     type StoredMessage,
 } from "../core/db";
 import { Native } from "../utils/nativeBridge";
+import { isChannelInArchiveScope } from "../core/scope";
 import { sanitizeSegment } from "../utils/sanitize";
 import { formatDeletionMarker, formatEditMarker, formatMessageLine, formatTimestamp } from "./format";
 
@@ -164,29 +165,46 @@ export async function rebuildConversationCsv(root: string, dir: string, conversa
 
 export async function rebuildAuthorFiles(root: string, author: StoredAuthor): Promise<void> {
     const dir = await claimPath(root, `Users/${sanitizeSegment(author.globalName ?? author.username)}`, author.id);
-    const profile = {
-        id: author.id,
-        username: author.username,
-        globalName: author.globalName,
-        nameHistory: author.nameHistory,
-        firstSeen: new Date(author.firstSeenMs).toISOString(),
-        lastSeen: new Date(author.lastSeenMs).toISOString()
-    };
-    await Native.writeAtomic(root, `${dir}/Profile.json`, JSON.stringify(profile, null, 2));
-
     const tmpTxt = `${dir}/Chat.txt.tmp`;
     const tmpJson = `${dir}/Chat.json.tmp`;
     await Native.remove(root, tmpTxt).catch(() => { });
     await Native.remove(root, tmpJson).catch(() => { });
+
     let firstJson = true;
+    let wroteAny = false;
+    const channelScope = new Map<string, boolean>();
 
     await iterateAuthorMessages(author.id, async batch => {
-        const sorted = [...batch].sort((a, b) => a.timestampMs - b.timestampMs || (a.id < b.id ? -1 : 1));
+        const scoped: StoredMessage[] = [];
+        for (const message of batch) {
+            let allowed = channelScope.get(message.channelId);
+            if (allowed === undefined) {
+                allowed = await isChannelInArchiveScope(message.channelId);
+                channelScope.set(message.channelId, allowed);
+            }
+            if (allowed) scoped.push(message);
+        }
+        if (scoped.length === 0) return;
+
+        if (!wroteAny) {
+            wroteAny = true;
+            const profile = {
+                id: author.id,
+                username: author.username,
+                globalName: author.globalName,
+                nameHistory: author.nameHistory,
+                firstSeen: new Date(author.firstSeenMs).toISOString(),
+                lastSeen: new Date(author.lastSeenMs).toISOString()
+            };
+            await Native.writeAtomic(root, `${dir}/Profile.json`, JSON.stringify(profile, null, 2));
+        }
+
+        const sorted = [...scoped].sort((a, b) => a.timestampMs - b.timestampMs || (a.id < b.id ? -1 : 1));
         const txt = sorted
-            .map(m => `[${formatTimestamp(m.timestampMs)}] ${m.authorName}: ${m.content.replace(/\r?\n/g, " ")}`)
-            .join("\n") + "\n";
-        const chunk = sorted.map(m => JSON.stringify(m)).join(",\n");
-        const prefix = firstJson ? "[\n" : ",\n";
+            .map(m => `[${formatTimestamp(m.timestampMs)}] ${m.authorName}: ${m.content.replace(/\\r?\\n/g, " ")}`)
+            .join("\\n") + "\\n";
+        const chunk = sorted.map(m => JSON.stringify(m)).join(",\\n");
+        const prefix = firstJson ? "[\\n" : ",\\n";
         firstJson = false;
         await Promise.all([
             Native.append(root, tmpTxt, txt),
@@ -194,7 +212,12 @@ export async function rebuildAuthorFiles(root: string, author: StoredAuthor): Pr
         ]);
     });
 
-    await Native.append(root, tmpJson, firstJson ? "[]\n" : "\n]\n");
+    if (!wroteAny) {
+        await Native.remove(root, tmpTxt).catch(() => { });
+        await Native.remove(root, tmpJson).catch(() => { });
+        return;
+    }
+    await Native.append(root, tmpJson, firstJson ? "[]\\n" : "\\n]\\n");
     await Native.rename(root, tmpTxt, `${dir}/Chat.txt`);
     await Native.rename(root, tmpJson, `${dir}/Chat.json`);
 }
