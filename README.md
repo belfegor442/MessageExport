@@ -6,7 +6,7 @@ A private [Vencord](https://vencord.dev) user plugin that exports Discord conver
 
 ## Privacy and consent
 
-Automatic archiving, history recovery, and attachment downloads are opt-in and disabled by default. The archive may contain private messages, usernames, attachments, and deletion markers. Review the storage path and keep the folder private before enabling it. Deleted messages may remain in the local archive marked as deleted; this project does not provide a retention or purge system. The plugin does not intentionally upload archive contents; optional attachment downloads request Discord CDN hosts.
+Automatic archiving, history recovery, and attachment downloads are opt-in and disabled by default. Server selection is also explicit: no guild is selected by default, and the plugin ignores unselected guilds during discovery, live capture, and history recovery. The archive may contain private messages, usernames, attachments, and deletion markers. Review the storage path and keep the folder private before enabling it. Deleted messages may remain in the local archive marked as deleted; this project does not provide a retention or purge system. The plugin does not intentionally upload archive contents; optional attachment downloads request Discord CDN hosts.
 
 ## What it does
 
