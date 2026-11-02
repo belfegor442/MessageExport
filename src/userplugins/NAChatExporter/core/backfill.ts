@@ -129,11 +129,15 @@ export async function backfillConversation(channelId: string, canAbort: () => bo
         pages++;
         if (page.length === 0) break;
 
-        const persisted = await persistPage(channelId, page);
+        // Never persist more raw entries than the remaining cap in one page.
+        // Duplicate entries may mean another page is needed to reach the exact inserted cap.
+        const remaining = maxMessages > 0 ? Math.max(1, maxMessages - inserted) : page.length;
+        const pageToPersist = page.slice(0, Math.min(page.length, remaining));
+        const persisted = await persistPage(channelId, pageToPersist);
         inserted += persisted.inserted;
         skipped += persisted.skipped;
 
-        const oldest = page[page.length - 1];
+        const oldest = pageToPersist[pageToPersist.length - 1];
         if (!oldest?.id || oldest.id === before) {
             failures++;
             outcome = "error";
