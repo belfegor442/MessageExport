@@ -2,18 +2,22 @@
 
 A private [Vencord](https://vencord.dev) user plugin that exports Discord conversations **message by message** with full metadata and an explicit integrity manifest — an incomplete export is never presented as complete.
 
-> **Status:** active development. Phase 5 complete — JSON export of the currently open conversation works end to end. HTML / CSV / TXT formatters and the export dialog are planned next.
+> **Status:** active development. The plugin archives supported accessible conversations locally, captures live events, can recover API-accessible history, and maintains derived TXT/JSON with optional CSV. It is not a guaranteed complete account export.
+
+## Privacy and consent
+
+Automatic archiving, history recovery, and attachment downloads are opt-in and disabled by default. The archive may contain private messages, usernames, attachments, and deletion markers. Review the storage path and keep the folder private before enabling it. Deleted messages may remain in the local archive marked as deleted; this project does not provide a retention or purge system. The plugin does not intentionally upload archive contents; optional attachment downloads request Discord CDN hosts.
 
 ## What it does
 
-- Exports the **currently open conversation** (guild text/announcement channels, threads, DMs and group DMs) to a JSON file via the native save dialog.
+- Archives supported conversations discovered from the Discord client and incoming events; the primary store is renderer IndexedDB (`NAChatExporterArchive`), and local TXT/JSON/CSV files are derived exports.
 - Collects history through Discord's internal REST API (`GET /channels/{id}/messages`), **not** the client cache:
   - paginates backwards with a `before` cursor, 100 messages per page
   - configurable delay between requests (default 500 ms) — gentle on Discord
   - on HTTP 429 it **waits** the server-provided `retry_after` and retries (up to 3 attempts); no rate-limit evasion
   - deduplicates messages across page boundaries and stalls safely if the cursor stops advancing
   - optional safety cap (`maxMessages`, 0 = unlimited)
-- Writes messages **raw and lossless** (exactly as returned by the API), oldest → newest, plus an integrity block.
+- Captures supported live message events, edits, deletion markers, reactions, and observable voice-state events. CSV maintenance is optional.
 
 ### Integrity manifest
 
@@ -71,7 +75,7 @@ Settings:
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `pageDelayMs` | 500 | Delay between history requests (100–2000 ms) |
+| `archivingEnabled` | false | Enable automatic local archiving (opt-in) |\n| `backfillHistory` | false | Recover API-accessible history (opt-in) |\n| `downloadAttachments` | false | Download Discord CDN attachments (opt-in; 50 MiB maximum per file) |\n| `maintainCsv` | false | Maintain CSV output in addition to TXT and JSON |\n| `pageDelayMs` | 500 | Delay between history requests (100–2000 ms) |
 | `maxMessages` | 0 | Safety cap per export (0 = no limit) |
 | `defaultFormat` | JSON | Preselected format for the (planned) export dialog |
 
