@@ -7,9 +7,12 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
+import { GuildSelection } from "./GuildSelection";
+
 type LifecycleHooks = {
     onArchivingToggled?: (enabled: boolean) => void;
     onStorageRootChanged?: () => void;
+    onGuildSelectionChanged?: () => void;
 };
 
 let hooks: LifecycleHooks = {};
@@ -18,11 +21,24 @@ export function registerLifecycleHooks(next: LifecycleHooks): void {
     hooks = next;
 }
 
+export function notifyGuildSelectionChanged(): void {
+    hooks.onGuildSelectionChanged?.();
+}
+
 export const settings = definePluginSettings({
+    selectedGuildIds: {
+        type: OptionType.CUSTOM,
+        default: [] as string[],
+        hidden: true
+    },
+    guildSelectionComponent: {
+        type: OptionType.COMPONENT,
+        component: GuildSelection
+    },
     archivingEnabled: {
         type: OptionType.BOOLEAN,
-        description: "Automatically archive every accessible conversation (messages, edits, deletions, reactions) to disk",
-        default: true,
+        description: "Opt in to automatically archive accessible conversations locally. Archives may contain sensitive messages; review the destination and retention before enabling.",
+        default: false,
         onChange: value => hooks.onArchivingToggled?.(Boolean(value))
     },
     storageRoot: {
@@ -33,13 +49,13 @@ export const settings = definePluginSettings({
     },
     backfillHistory: {
         type: OptionType.BOOLEAN,
-        description: "Recover message history that is still accessible via Discord's API",
-        default: true
+        description: "Opt in to recover accessible message history through Discord's API. This can archive a large amount of private content.",
+        default: false
     },
     downloadAttachments: {
         type: OptionType.BOOLEAN,
-        description: "Download attachments from Discord's CDN into the archive (references are always kept)",
-        default: true
+        description: "Opt in to download attachments from Discord's CDN. References are kept when downloads are disabled.",
+        default: false
     },
     maintainCsv: {
         type: OptionType.BOOLEAN,

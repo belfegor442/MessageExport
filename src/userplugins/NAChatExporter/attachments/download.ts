@@ -15,6 +15,65 @@ import { Native } from "../utils/nativeBridge";
 import { sanitizeSegment } from "../utils/sanitize";
 
 const DOWNLOAD_DELAY_MS = 350;
+const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+const ALLOWED_CDN_HOSTS = new Set([
+    "cdn.discordapp.com",
+    "cdn.discordapp.net",
+    "media.discordapp.net",
+    "images-ext-1.discordapp.net",
+    "images-ext-2.discordapp.net"
+]);
+
+function isAllowedCdnUrl(value: string): boolean {
+    try {
+        const url = new URL(value);
+        return url.protocol === "https:"
+            && !url.username
+            && !url.password
+            && ALLOWED_CDN_HOSTS.has(url.hostname.toLowerCase());
+    } catch {
+        return false;
+    }
+}
+
+async function readBoundedBody(response: Response): Promise<Uint8Array> {
+    const declaredLength = Number(response.headers.get("content-length") ?? 0);
+    if (declaredLength > MAX_ATTACHMENT_BYTES)
+        throw new Error(`attachment exceeds ${MAX_ATTACHMENT_BYTES} byte limit`);
+    if (!response.body) {
+        const data = new Uint8Array(await response.arrayBuffer());
+        if (data.byteLength > MAX_ATTACHMENT_BYTES)
+            throw new Error(`attachment exceeds ${MAX_ATTACHMENT_BYTES} byte limit`);
+        return data;
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+            total += value.byteLength;
+            if (total > MAX_ATTACHMENT_BYTES) {
+                await reader.cancel();
+                throw new Error(`attachment exceeds ${MAX_ATTACHMENT_BYTES} byte limit`);
+            }
+            chunks.push(value);
+        }
+    } finally {
+        reader.releaseLock();
+    }
+
+    const data = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+        data.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return data;
+}
 
 interface QueueItem {
     root: string;
@@ -81,9 +140,17 @@ async function downloadOne(item: QueueItem): Promise<void> {
     const filename = sanitizeSegment(attachment.filename);
 
     try {
+        if (!isAllowedCdnUrl(attachment.url))
+            throw new Error("attachment URL is not an allowed HTTPS Discord CDN URL");
+        if (attachment.size > MAX_ATTACHMENT_BYTES)
+            throw new Error(`attachment exceeds ${MAX_ATTACHMENT_BYTES} byte limit`);
+
         const res = await fetch(attachment.url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = new Uint8Array(await res.arrayBuffer());
+        // Fetch follows redirects; validate the final URL as well as the original.
+        if (!isAllowedCdnUrl(res.url))
+            throw new Error("attachment redirected outside the allowed Discord CDN");
+        const data = await readBoundedBody(res);
         if (data.byteLength === 0) throw new Error("empty response body");
 
         let relPath = `${base}/${message.id}-${filename}`;

@@ -9,6 +9,7 @@ import { ChannelStore, GuildStore } from "@webpack/common";
 
 import { upsertConversation } from "./db";
 import { logEvent } from "./events";
+import { isGuildSelected } from "./scope";
 
 export const EXPORTABLE_TYPES = new Set<number>([
     ChannelType.GUILD_TEXT,
@@ -68,7 +69,7 @@ function describeGuildChannel(channel: any, guildName: string, guildId?: string)
     };
 }
 
-/** Scans every store-known conversation and persists descriptors for archiving. */
+/** Scans private channels and only the guilds explicitly selected by the user. */
 export async function discoverConversations(root: string): Promise<number> {
     const descriptors: ConversationDescriptor[] = [];
     const seen = new Set<string>();
@@ -81,6 +82,7 @@ export async function discoverConversations(root: string): Promise<number> {
     }
 
     for (const guild of GuildStore.getGuildsArray()) {
+        if (!isGuildSelected(String(guild.id))) continue;
         const guildName = guild.name;
         const channels = Object.values(ChannelStore.getMutableGuildChannelsForGuild(guild.id));
         const threads = ChannelStore.getAllThreadsForGuild(guild.id);

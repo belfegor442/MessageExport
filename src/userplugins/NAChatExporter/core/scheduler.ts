@@ -49,6 +49,7 @@ import { endSession, logEvent, startSession, updateSessionStats, writeIntegrity 
 import { registerDerivedHooks, setArchivingActive } from "./hooks";
 import { setLiveLogRoot } from "./live";
 import { discoverConversations } from "./registry";
+import { isChannelInArchiveScope } from "./scope";
 
 const PLUGIN_VERSION = "1.0.0";
 const TXT_DEBOUNCE_MS = 2000;
@@ -129,6 +130,11 @@ function hasBackfillInFlight(conversation: StoredConversation): boolean {
 }
 
 async function flushTxt(channelId: string): Promise<void> {
+    if (!await isChannelInArchiveScope(channelId)) {
+        txtDirty.delete(channelId);
+        pendingMarkers.delete(channelId);
+        return;
+    }
     const conversation = await getConversation(channelId);
     if (!conversation) {
         pendingMarkers.delete(channelId);
@@ -206,6 +212,10 @@ async function drainTxt(): Promise<void> {
 }
 
 async function flushJson(channelId: string): Promise<void> {
+    if (!await isChannelInArchiveScope(channelId)) {
+        jsonDirty.delete(channelId);
+        return;
+    }
     const conversation = await getConversation(channelId);
     if (!conversation) return;
     // Perf deferral only: JSON is a full dump of the source of truth, but rebuilding
@@ -332,7 +342,12 @@ async function onMessageDeleted(channelId: string, messageId: string): Promise<v
 }
 
 async function seedPendingWork(): Promise<void> {
-    const conversations = await getAllConversations();
+    const allConversations = await getAllConversations();
+    const conversations = [];
+    for (const conversation of allConversations) {
+        if (await isChannelInArchiveScope(conversation.id))
+            conversations.push(conversation);
+    }
     for (const conversation of conversations) {
         txtDirty.add(conversation.id);
         if (conversation.jsonDirty) jsonDirty.add(conversation.id);
@@ -363,9 +378,10 @@ async function runBackfillLoop(): Promise<void> {
     const attempted = new Set<string>();
     while (!stopRequested) {
         try {
-            const conversations = await getAllConversations();
-            for (const conversation of conversations) {
+            const allConversations = await getAllConversations();
+            for (const conversation of allConversations) {
                 if (stopRequested) break;
+                if (!await isChannelInArchiveScope(conversation.id)) continue;
                 if (attempted.has(conversation.id)) continue;
                 attempted.add(conversation.id);
                 if (conversation.backfillStatus === "complete") continue;
@@ -437,7 +453,12 @@ async function doStop(autoRestart: boolean): Promise<void> {
     // Final drain: re-seed from the database so everything the source of truth has
     // is exported before the session closes
     try {
-        const conversations = await getAllConversations();
+        const allConversations = await getAllConversations();
+        const conversations = [];
+        for (const conversation of allConversations) {
+            if (await isChannelInArchiveScope(conversation.id))
+                conversations.push(conversation);
+        }
         for (const conversation of conversations) {
             txtDirty.add(conversation.id);
             if (conversation.jsonDirty) jsonDirty.add(conversation.id);
@@ -452,8 +473,13 @@ async function doStop(autoRestart: boolean): Promise<void> {
     }
 
     try {
-        const conversations = await getAllConversations();
-        const mismatches = await repairConversationCounts();
+        const allConversations = await getAllConversations();
+        const conversations = [];
+        for (const conversation of allConversations) {
+            if (await isChannelInArchiveScope(conversation.id))
+                conversations.push(conversation);
+        }
+        const mismatches = (await repairConversationCounts()).filter(m => conversations.some(conversation => conversation.id === m.channelId));
         const incompleteBackfills = conversations.filter(c =>
             c.backfillStatus === "pending" || c.backfillStatus === "in_progress"
         ).length;
@@ -550,6 +576,11 @@ export async function startArchiving(): Promise<void> {
 
 export function handleArchivingToggled(enabled: boolean): Promise<void> {
     return enabled ? startArchiving() : stopArchiving();
+}
+
+export function handleGuildSelectionChanged(): void {
+    if (running)
+        void stopArchiving(true);
 }
 
 export function handleStorageRootChanged(): void {
