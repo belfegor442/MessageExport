@@ -1,8 +1,12 @@
 # FASE 1 — Auditoría técnica
 
-Fecha: 2026-11-02 · Rama: `main` · Alcance: inspección completa previa a cualquier modificación.
+Fecha: 2026-11-02 · Rama: `main` · Alcance: inspección histórica previa a la remediación. Este documento conserva el diagnóstico original; no representa el estado actual del código.
 
 ---
+
+
+
+> **Estado posterior (rama `audit/fixes-2026-11`):** se corrigieron la creación de directorios de salida, la numeración de versiones de edición, el caso de conversaciones vacías, el escape CSV, la actualización observada primero mediante `MESSAGE_UPDATE`, el límite por página del backfill y la descarga de adjuntos con lista de hosts HTTPS permitidos y límite de 50 MiB. Los valores predeterminados de archivado, recuperación histórica y descarga de adjuntos se cambiaron a opt-in. Estas modificaciones requieren validación con TypeScript, ESLint, build y pruebas en Discord Desktop; no se debe asumir que están verificadas en runtime.
 
 ## 1. Estado actual del plugin (6 archivos, todo en `src/userplugins/NAChatExporter/`)
 
