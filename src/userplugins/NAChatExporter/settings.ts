@@ -7,9 +7,12 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
+import { GuildSelection } from "./GuildSelection";
+
 type LifecycleHooks = {
     onArchivingToggled?: (enabled: boolean) => void;
     onStorageRootChanged?: () => void;
+    onGuildSelectionChanged?: () => void;
 };
 
 let hooks: LifecycleHooks = {};
@@ -19,6 +22,15 @@ export function registerLifecycleHooks(next: LifecycleHooks): void {
 }
 
 export const settings = definePluginSettings({
+    selectedGuildIds: {
+        type: OptionType.CUSTOM,
+        default: [] as string[],
+        hidden: true
+    },
+    guildSelectionComponent: {
+        type: OptionType.COMPONENT,
+        component: GuildSelection
+    },
     archivingEnabled: {
         type: OptionType.BOOLEAN,
         description: "Opt in to automatically archive accessible conversations locally. Archives may contain sensitive messages; review the destination and retention before enabling.",
