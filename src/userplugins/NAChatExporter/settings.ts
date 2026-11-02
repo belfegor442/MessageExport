@@ -33,8 +33,8 @@ export const settings = definePluginSettings({
     },
     backfillHistory: {
         type: OptionType.BOOLEAN,
-        description: "Recover message history that is still accessible via Discord's API",
-        default: true
+        description: "Opt in to recover accessible message history through Discord's API. This can archive a large amount of private content.",
+        default: false
     },
     downloadAttachments: {
         type: OptionType.BOOLEAN,
