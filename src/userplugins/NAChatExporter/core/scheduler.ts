@@ -569,6 +569,11 @@ export function handleArchivingToggled(enabled: boolean): Promise<void> {
     return enabled ? startArchiving() : stopArchiving();
 }
 
+export function handleGuildSelectionChanged(): void {
+    if (running)
+        void stopArchiving(true);
+}
+
 export function handleStorageRootChanged(): void {
     if (!running) return;
     if (rootChangeTimer) clearTimeout(rootChangeTimer);
