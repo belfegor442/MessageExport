@@ -20,6 +20,7 @@ import {
 import { logEvent } from "./events";
 import { emitDeleted, emitEdited, emitStored, isArchivingActive } from "./hooks";
 import { describeChannelById } from "./registry";
+import { isChannelInArchiveScope } from "./scope";
 
 interface MessageCreateEvent { message: any; channelId?: string; }
 interface MessageUpdateEvent { message: any; }
@@ -62,7 +63,7 @@ export async function handleMessageCreate(event: MessageCreateEvent): Promise<vo
     const { message } = event;
     if (!message?.id) return;
     const channelId = String(message.channel_id ?? event.channelId ?? "");
-    if (!channelId) return;
+    if (!channelId || !await isChannelInArchiveScope(channelId)) return;
 
     try {
         await ensureConversation(channelId);
@@ -83,7 +84,7 @@ export async function handleMessageUpdate(event: MessageUpdateEvent): Promise<vo
     if (!message?.id) return;
     const channelId = String(message.channel_id ?? "");
     const messageId = String(message.id);
-    if (!channelId) return;
+    if (!channelId || !await isChannelInArchiveScope(channelId)) return;
 
     try {
         const editedTimestamp = message.edited_timestamp ?? message.editedTimestamp ?? null;
@@ -125,7 +126,8 @@ export async function handleMessageDelete(event: MessageDeleteEvent): Promise<vo
             const existing = await getMessageById(id).catch(() => undefined);
             channelId = existing?.channelId ?? "";
         }
-        const outcome = await markMessageDeleted(event.channelId ?? null, id);
+        if (!channelId || !await isChannelInArchiveScope(channelId)) return;
+        const outcome = await markMessageDeleted(channelId, id);
         if (outcome === "deleted") {
             logEvent(root, "message_deleted", { channelId: channelId || null, messageId: id });
             emitDeleted(channelId, id);
@@ -142,7 +144,7 @@ export async function handleMessageDeleteBulk(event: MessageDeleteBulkEvent): Pr
 }
 
 export async function handleReactionAdd(event: ReactionEvent): Promise<void> {
-    if (!isArchivingActive()) return;
+    if (!isArchivingActive() || !await isChannelInArchiveScope(event.channelId)) return;
     try {
         const applied = await applyReactionState(
             event.channelId,
@@ -161,7 +163,7 @@ export async function handleReactionAdd(event: ReactionEvent): Promise<void> {
 }
 
 export async function handleReactionRemove(event: ReactionEvent): Promise<void> {
-    if (!isArchivingActive()) return;
+    if (!isArchivingActive() || !await isChannelInArchiveScope(event.channelId)) return;
     try {
         await applyReactionState(
             event.channelId,
@@ -178,7 +180,7 @@ export async function handleReactionRemove(event: ReactionEvent): Promise<void> 
 }
 
 export async function handleReactionRemoveAll(event: ReactionRemoveAllEvent): Promise<void> {
-    if (!isArchivingActive()) return;
+    if (!isArchivingActive() || !await isChannelInArchiveScope(event.channelId)) return;
     try {
         await clearReactions(event.channelId, event.messageId);
         await recordReactionEvent(event.channelId, event.messageId, {}, "clear", null);
@@ -191,6 +193,8 @@ export async function handleVoiceStateUpdate(event: { voiceStates: VoiceStateEve
     if (!isArchivingActive()) return;
     for (const state of event.voiceStates ?? []) {
         if (!state.userId) continue;
+        const relevantChannelId = state.channelId ?? state.oldChannelId;
+        if (!relevantChannelId || !await isChannelInArchiveScope(relevantChannelId)) continue;
         const type = state.channelId && !state.oldChannelId
             ? "voice_join"
             : !state.channelId && state.oldChannelId
