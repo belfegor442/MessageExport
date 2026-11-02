@@ -92,7 +92,11 @@ export async function handleMessageUpdate(event: MessageUpdateEvent): Promise<vo
 
         if (!stored) {
             // Not captured yet (e.g. edited while plugin was off): persist current state as-is
-            await insertMessagesIfAbsent([message], "live");
+            const inserted = await insertMessagesIfAbsent([message], "live");
+            for (const storedMessage of inserted.stored) {
+                logEvent(root, "message_captured", { channelId, messageId, source: "live_update" });
+                emitStored(storedMessage);
+            }
             return;
         }
 
