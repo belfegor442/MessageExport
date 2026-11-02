@@ -6,7 +6,7 @@
 
 import { Forms, GuildStore } from "@webpack/common";
 
-import { settings } from "./settings";
+import { notifyGuildSelectionChanged, settings } from "./settings";
 
 export function GuildSelection() {
     const { selectedGuildIds } = settings.use(["selectedGuildIds"]);
@@ -20,6 +20,7 @@ export function GuildSelection() {
         else
             next.delete(id);
         settings.store.selectedGuildIds = [...next];
+        notifyGuildSelectionChanged();
     }
 
     return (
