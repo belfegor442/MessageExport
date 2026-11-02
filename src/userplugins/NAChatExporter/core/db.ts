@@ -537,14 +537,14 @@ export async function recordEdit(channelId: string, messageId: string, newConten
     versionsStore.put({
         channelId,
         messageId,
-        version: rowsBefore + 1,
+        version: rowsBefore === 0 ? 2 : rowsBefore + 1,
         content: newContent,
         editedAtMs,
         capturedAtMs: Date.now()
     });
     message.content = newContent;
     message.edited = true;
-    message.editCount = rowsBefore === 0 ? 1 : rowsBefore;
+    message.editCount = (message.editCount ?? 0) + 1;
     messagesStore.put(message);
     await markConversationContentChanged(tx, channelId);
     await promisifyRequest(tx);
