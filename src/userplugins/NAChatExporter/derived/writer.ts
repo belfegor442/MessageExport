@@ -122,6 +122,8 @@ export async function rebuildConversationTxt(root: string, dir: string, conversa
     await Native.remove(root, tmpPath).catch(() => { });
     let last: StoredMessage | undefined;
 
+    // Create the temporary file even when there are no messages to append.
+    await Native.append(root, tmpPath, "");
     await iterateChannelMessages(conversation.id, batch =>
         appendMessagesToTxt(root, tmpPath, batch).then(() => { last = batch[batch.length - 1]; }), 500);
 
@@ -132,7 +134,13 @@ export async function rebuildConversationTxt(root: string, dir: string, conversa
 export async function rebuildConversationCsv(root: string, dir: string, conversation: StoredConversation): Promise<boolean> {
     const tmpPath = `${dir}/Chat.csv.tmp`;
     await Native.remove(root, tmpPath).catch(() => { });
-    let first = true;
+    const header = "id,channel_id,timestamp,author_id,author_name,content,edited,deleted,attachment_count,reply_to";
+    await Native.append(root, tmpPath, header + "\n");
+
+    const csvCell = (value: unknown): string => {
+        const text = String(value ?? "");
+        return /[\",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
 
     await iterateChannelMessages(conversation.id, batch => {
         const rows = batch.map(m => [
@@ -140,18 +148,14 @@ export async function rebuildConversationCsv(root: string, dir: string, conversa
             m.channelId,
             new Date(m.timestampMs).toISOString(),
             m.authorId,
-            JSON.stringify(m.authorName),
-            JSON.stringify(m.content),
+            m.authorName,
+            m.content,
             m.edited ? "true" : "false",
             m.deleted ? "true" : "false",
             String(m.attachments.length),
             m.messageReference?.messageId ?? ""
-        ].join(","));
-        if (first) {
-            rows.unshift("id,channel_id,timestamp,author_id,author_name,content,edited,deleted,attachment_count,reply_to");
-            first = false;
-        }
-        return Native.append(root, tmpPath, rows.join("\n") + "\n");
+        ].map(csvCell).join(","));
+        return Native.append(root, tmpPath, rows.join("\n") + (rows.length ? "\n" : ""));
     });
 
     await Native.rename(root, tmpPath, `${dir}/Chat.csv`);
