@@ -18,6 +18,8 @@ import {
 } from "./core/live";
 import {
     handleArchivingToggled,
+    handleAttachmentGuildsChanged,
+    handleBackfillHistoryChanged,
     handleStorageRootChanged,
     requestDiscover,
     startArchiving,
@@ -56,7 +58,9 @@ export default definePlugin({
     start() {
         registerLifecycleHooks({
             onArchivingToggled: handleArchivingToggled,
-            onStorageRootChanged: handleStorageRootChanged
+            onBackfillHistoryChanged: handleBackfillHistoryChanged,
+            onStorageRootChanged: handleStorageRootChanged,
+            onAttachmentGuildsChanged: handleAttachmentGuildsChanged
         });
         if (settings.store.archivingEnabled)
             void startArchiving();

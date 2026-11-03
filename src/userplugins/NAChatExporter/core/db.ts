@@ -5,7 +5,7 @@
  */
 
 const DB_NAME = "NAChatExporterArchive";
-const DB_VERSION = 1;
+const DB_VERSION = 4;
 
 export interface StoredAttachment {
     id: string;
@@ -103,15 +103,6 @@ export interface StoredReactionEvent {
     atMs: number;
 }
 
-export interface StoredAuthor {
-    id: string;
-    username: string;
-    globalName: string | null;
-    nameHistory: { name: string; username: string; changedAtMs: number; }[];
-    firstSeenMs: number;
-    lastSeenMs: number;
-}
-
 export interface StoredConversation {
     id: string;
     type: number;
@@ -154,12 +145,23 @@ function promisifyRequest<T>(request: IDBRequest<T> | IDBTransaction): Promise<T
     });
 }
 
-function upgradeDatabase(db: IDBDatabase) {
+function upgradeDatabase(db: IDBDatabase, transaction: IDBTransaction | null) {
+    let messages: IDBObjectStore;
     if (!db.objectStoreNames.contains("messages")) {
-        const messages = db.createObjectStore("messages", { keyPath: ["channelId", "id"] });
+        messages = db.createObjectStore("messages", { keyPath: ["channelId", "id"] });
         messages.createIndex("by_messageId", "id");
         messages.createIndex("by_channel_time", ["channelId", "timestampMs"]);
-        messages.createIndex("by_author", "authorId");
+        messages.createIndex("by_channel_source", ["channelId", "source"]);
+    } else {
+        if (!transaction)
+            throw new Error("Missing IndexedDB upgrade transaction");
+        messages = transaction.objectStore("messages");
+        if (!messages.indexNames.contains("by_channel_source"))
+            messages.createIndex("by_channel_source", ["channelId", "source"]);
+        if (messages.indexNames.contains("by_author"))
+            messages.deleteIndex("by_author");
+        if (messages.indexNames.contains("by_author_channel_time"))
+            messages.deleteIndex("by_author_channel_time");
     }
     if (!db.objectStoreNames.contains("versions")) {
         const versions = db.createObjectStore("versions", { keyPath: ["channelId", "messageId", "version"] });
@@ -171,8 +173,8 @@ function upgradeDatabase(db: IDBDatabase) {
     }
     if (!db.objectStoreNames.contains("conversations"))
         db.createObjectStore("conversations", { keyPath: "id" });
-    if (!db.objectStoreNames.contains("authors"))
-        db.createObjectStore("authors", { keyPath: "id" });
+    if (db.objectStoreNames.contains("authors"))
+        db.deleteObjectStore("authors");
     if (!db.objectStoreNames.contains("meta"))
         db.createObjectStore("meta", { keyPath: "key" });
 }
@@ -181,7 +183,7 @@ export function openDatabase(): Promise<IDBDatabase> {
     if (!dbPromise) {
         dbPromise = new Promise((resolve, reject) => {
             const request = indexedDB.open(DB_NAME, DB_VERSION);
-            request.onupgradeneeded = () => upgradeDatabase(request.result);
+            request.onupgradeneeded = () => upgradeDatabase(request.result, request.transaction);
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error ?? new Error("Failed to open the archive database"));
             request.onblocked = () => reject(new Error("Archive database upgrade blocked by another tab"));
@@ -326,9 +328,8 @@ export async function insertMessagesIfAbsent(rawMessages: any[], source: "backfi
     }
     if (messages.length === 0) return { inserted: 0, skipped: 0, stored: [] };
 
-    const tx = db.transaction(["messages", "authors", "conversations"], "readwrite");
+    const tx = db.transaction(["messages", "conversations"], "readwrite");
     const messagesStore = tx.objectStore("messages");
-    const authorsStore = tx.objectStore("authors");
     const conversationsStore = tx.objectStore("conversations");
 
     const existing = await Promise.all(
@@ -343,42 +344,11 @@ export async function insertMessagesIfAbsent(rawMessages: any[], source: "backfi
     for (const message of toInsert)
         messagesStore.put(message);
 
-    const touchedAuthors = new Map<string, StoredMessage>();
     const touchedChannels = new Map<string, StoredMessage[]>();
     for (const message of toInsert) {
-        if (message.authorId && !touchedAuthors.has(message.authorId))
-            touchedAuthors.set(message.authorId, message);
         const list = touchedChannels.get(message.channelId);
         if (list) list.push(message);
         else touchedChannels.set(message.channelId, [message]);
-    }
-
-    for (const [authorId, message] of touchedAuthors) {
-        const existingAuthor = await promisifyRequest<StoredAuthor | undefined>(authorsStore.get(authorId));
-        const globalName = message.authorName !== message.authorUsername ? message.authorName : null;
-        if (!existingAuthor) {
-            authorsStore.put({
-                id: authorId,
-                username: message.authorUsername,
-                globalName,
-                nameHistory: [],
-                firstSeenMs: message.timestampMs || now,
-                lastSeenMs: message.timestampMs || now
-            });
-            continue;
-        }
-        const nameChanged = existingAuthor.username !== message.authorUsername
-            || (existingAuthor.globalName ?? null) !== globalName;
-        if (nameChanged)
-            existingAuthor.nameHistory.push({
-                name: existingAuthor.globalName ?? existingAuthor.username,
-                username: existingAuthor.username,
-                changedAtMs: existingAuthor.lastSeenMs
-            });
-        existingAuthor.username = message.authorUsername;
-        existingAuthor.globalName = globalName;
-        existingAuthor.lastSeenMs = Math.max(existingAuthor.lastSeenMs, message.timestampMs || now);
-        authorsStore.put(existingAuthor);
     }
 
     for (const [channelId, channelMessages] of touchedChannels) {
@@ -474,12 +444,49 @@ export async function patchMessage(
     return true;
 }
 
+export async function updateMessageMetadata(channelId: string, messageId: string, raw: any): Promise<boolean> {
+    const normalized = normalizeMessage({ ...raw, channel_id: channelId, id: messageId }, "live");
+    let changed = false;
+    const found = await patchMessage(channelId, messageId, message => {
+        const assign = <K extends keyof StoredMessage>(key: K, value: StoredMessage[K]) => {
+            if (JSON.stringify(message[key]) === JSON.stringify(value)) return;
+            message[key] = value;
+            changed = true;
+        };
+
+        if ("pinned" in raw) assign("pinned", Boolean(raw.pinned));
+        if ("type" in raw) assign("type", normalized.type);
+        if ("flags" in raw) assign("flags", normalized.flags);
+        if ("mention_everyone" in raw || "mentionEveryone" in raw)
+            assign("mentionsEveryone", normalized.mentionsEveryone);
+        if ("mentions" in raw) assign("mentions", normalized.mentions);
+        if ("mention_roles" in raw || "mentionRoles" in raw)
+            assign("mentionRoles", normalized.mentionRoles);
+        if ("message_reference" in raw || "messageReference" in raw)
+            assign("messageReference", normalized.messageReference);
+        if ("attachments" in raw) assign("attachments", normalized.attachments);
+        if ("embeds" in raw) assign("embeds", normalized.embeds);
+        if ("stickers" in raw || "stickerItems" in raw)
+            assign("stickers", normalized.stickers);
+        if ("reactions" in raw) assign("reactions", normalized.reactions);
+        if ("poll" in raw) assign("poll", normalized.poll);
+        if (raw.member && "nick" in raw.member)
+            assign("guildNick", typeof raw.member.nick === "string" ? raw.member.nick : null);
+        if ("edited_timestamp" in raw || "editedTimestamp" in raw)
+            assign("edited", (raw.edited_timestamp ?? raw.editedTimestamp) != null);
+
+        return changed;
+    });
+    return found && changed;
+}
+
 // Must run inside an active readwrite transaction on the "conversations" store
 async function markConversationContentChanged(tx: IDBTransaction, channelId: string): Promise<void> {
     const store = tx.objectStore("conversations");
     const conversation = await promisifyRequest<StoredConversation | undefined>(store.get(channelId));
     if (!conversation) return;
     conversation.jsonDirty = true;
+    conversation.txtNeedsRebuild = true;
     conversation.contentVersion++;
     store.put(conversation);
 }
@@ -724,20 +731,6 @@ export async function getAllConversations(): Promise<StoredConversation[]> {
     );
 }
 
-export async function getAuthor(id: string): Promise<StoredAuthor | undefined> {
-    const db = await openDatabase();
-    return promisifyRequest<StoredAuthor | undefined>(
-        db.transaction("authors").objectStore("authors").get(id)
-    );
-}
-
-export async function getAllAuthors(): Promise<StoredAuthor[]> {
-    const db = await openDatabase();
-    return promisifyRequest<StoredAuthor[]>(
-        db.transaction("authors").objectStore("authors").getAll()
-    );
-}
-
 export async function countAllMessages(): Promise<number> {
     const db = await openDatabase();
     return promisifyRequest<number>(db.transaction("messages").objectStore("messages").count());
@@ -751,9 +744,12 @@ export async function countChannelMessages(channelId: string): Promise<number> {
     );
 }
 
-export async function countAuthors(): Promise<number> {
+export async function countBackfillMessages(channelId: string): Promise<number> {
     const db = await openDatabase();
-    return promisifyRequest<number>(db.transaction("authors").objectStore("authors").count());
+    const store = db.transaction("messages").objectStore("messages");
+    return promisifyRequest<number>(
+        store.index("by_channel_source").count(IDBKeyRange.only([channelId, "backfill"]))
+    );
 }
 
 export async function iterateChannelMessages(
@@ -802,32 +798,6 @@ export async function iterateChannelMessages(
         afterMs = lastMs;
         skipId = lastId;
         if (batch.length < batchSize) break;
-    }
-
-    return total;
-}
-
-export async function iterateAuthorMessages(
-    authorId: string,
-    onBatch: (batch: StoredMessage[]) => void | Promise<void>,
-    batchSize = 500
-): Promise<number> {
-    const db = await openDatabase();
-    const keys = await promisifyRequest<IDBValidKey[]>(
-        db.transaction("messages").objectStore("messages").index("by_author").getAllKeys(IDBKeyRange.only(authorId))
-    );
-
-    let total = 0;
-    for (let offset = 0; offset < keys.length; offset += batchSize) {
-        const chunk = keys.slice(offset, offset + batchSize);
-        const tx = db.transaction("messages", "readonly");
-        const store = tx.objectStore("messages");
-        const batch = (await Promise.all(
-            chunk.map(key => promisifyRequest<StoredMessage | undefined>(store.get(key)))
-        )).filter((m): m is StoredMessage => m != null);
-        if (batch.length === 0) continue;
-        await onBatch(batch);
-        total += batch.length;
     }
 
     return total;

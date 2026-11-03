@@ -12,13 +12,13 @@ import {
     enqueueAttachment,
     getAttachmentStats,
     resetAttachmentStats,
+    scanPendingAttachments,
 } from "../attachments/download";
 import {
     appendMarkerToTxt,
     appendMessagesToTxt,
     buildDeletionMarkerLines,
     buildEditMarkerLines,
-    rebuildAuthorFiles,
     rebuildConversationCsv,
     rebuildConversationJson,
     rebuildConversationTxt,
@@ -32,10 +32,8 @@ import {
     clearJsonDirty,
     closeDatabase,
     countAllMessages,
-    countAuthors,
-    getAllAuthors,
+    countChannelMessages,
     getAllConversations,
-    getAuthor,
     getConversation,
     getMessage,
     iterateChannelMessages,
@@ -51,11 +49,11 @@ import { setLiveLogRoot } from "./live";
 import { discoverConversations } from "./registry";
 
 const PLUGIN_VERSION = "1.0.0";
-const TXT_DEBOUNCE_MS = 2000;
-const JSON_DEBOUNCE_MS = 15000;
-const AUTHOR_DEBOUNCE_MS = 600000;
+const TXT_DEBOUNCE_MS = 100;
+const JSON_DEBOUNCE_MS = 750;
 const STATS_FLUSH_MS = 30000;
 const BACKFILL_RESCAN_MS = 60000;
+const MAX_BACKFILL_RETRY_MS = 15 * 60 * 1000;
 const DISCOVER_DEBOUNCE_MS = 2000;
 const ROOT_CHANGE_DEBOUNCE_MS = 1500;
 const MAX_DRAIN_ROUNDS = 10;
@@ -68,15 +66,17 @@ let backfillLoop: Promise<void> | null = null;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
 let txtTimer: ReturnType<typeof setTimeout> | null = null;
 let jsonTimer: ReturnType<typeof setTimeout> | null = null;
-let authorTimer: ReturnType<typeof setTimeout> | null = null;
 let discoverTimer: ReturnType<typeof setTimeout> | null = null;
 let rootChangeTimer: ReturnType<typeof setTimeout> | null = null;
 let flushChain: Promise<void> = Promise.resolve();
 
 const txtDirty = new Set<string>();
 const jsonDirty = new Set<string>();
-const authorDirty = new Set<string>();
 const pendingMarkers = new Map<string, string[][]>();
+const jsonSnapshotChannels = new Set<string>();
+const txtSnapshotChannels = new Set<string>();
+const liveTxtDirty = new Set<string>();
+const liveJsonDirty = new Set<string>();
 
 let statMessages = 0;
 let statLiveEvents = 0;
@@ -97,15 +97,6 @@ function scheduleJsonFlush(delay = JSON_DEBOUNCE_MS): void {
     jsonTimer = setTimeout(() => {
         jsonTimer = null;
         void enqueueFlush(drainJson);
-    }, delay);
-}
-
-function scheduleAuthorFlush(delay = AUTHOR_DEBOUNCE_MS): void {
-    if (!running || stopRequested) return;
-    if (authorTimer) clearTimeout(authorTimer);
-    authorTimer = setTimeout(() => {
-        authorTimer = null;
-        void enqueueFlush(drainAuthors);
     }, delay);
 }
 
@@ -134,19 +125,35 @@ async function flushTxt(channelId: string): Promise<void> {
         pendingMarkers.delete(channelId);
         return;
     }
-    // Hold the TXT file until history recovery settles: backfill inserts older
-    // messages, and an append-only file written mid-recovery would look complete
-    // while silently missing the oldest history. The txtNeedsRebuild flag in the
-    // database survives this deferral.
-    if (hasBackfillInFlight(conversation)) {
-        txtDirty.add(channelId);
-        return;
-    }
-
     const dir = await resolveConversationDir(root, conversation);
     const path = `${dir}/Chat.txt`;
+    const fileInfo = await Native.stat(root, path).catch(() => null);
+    const fileExists = fileInfo != null;
 
-    const fileExists = (await Native.stat(root, path).catch(() => null)) != null;
+    // Backfill arrives newest-to-oldest. Write one initial snapshot, then defer
+    // historical pages while allowing live events to update the visible log.
+    if (hasBackfillInFlight(conversation)) {
+        if ((!fileInfo || fileInfo.size === 0)
+            && !txtSnapshotChannels.has(channelId)
+            && await countChannelMessages(channelId) > 0) {
+            txtSnapshotChannels.add(channelId);
+            liveTxtDirty.delete(channelId);
+            pendingMarkers.delete(channelId);
+            const version = conversation.contentVersion;
+            const last = await rebuildConversationTxt(root, dir, conversation);
+            await updateTxtCursor(
+                channelId,
+                last?.timestampMs ?? 0,
+                last?.id ?? null,
+                version
+            );
+            return;
+        }
+        if (!liveTxtDirty.has(channelId) && !pendingMarkers.has(channelId))
+            return;
+        liveTxtDirty.delete(channelId);
+    }
+
     const needsRebuild = conversation.txtNeedsRebuild || fileExists !== (conversation.txtCursorMs > 0);
 
     if (needsRebuild) {
@@ -208,14 +215,28 @@ async function drainTxt(): Promise<void> {
 async function flushJson(channelId: string): Promise<void> {
     const conversation = await getConversation(channelId);
     if (!conversation) return;
-    // Perf deferral only: JSON is a full dump of the source of truth, but rebuilding
-    // a large channel on every page of its history recovery would be wasteful
+    const dir = await resolveConversationDir(root, conversation);
+    const path = `${dir}/Chat.json`;
+
+    // Avoid a full JSON rewrite for every historical page, but persist the initial
+    // snapshot and subsequent live updates.
     if (hasBackfillInFlight(conversation)) {
-        jsonDirty.add(channelId);
+        const fileInfo = await Native.stat(root, path).catch(() => null);
+        const needsSnapshot = (!fileInfo || fileInfo.size === 0)
+            && !jsonSnapshotChannels.has(channelId)
+            && await countChannelMessages(channelId) > 0;
+        if (needsSnapshot || liveJsonDirty.has(channelId)) {
+            jsonSnapshotChannels.add(channelId);
+            liveJsonDirty.delete(channelId);
+            const version = conversation.contentVersion;
+            await rebuildConversationJson(root, dir, conversation);
+            if (settings.store.maintainCsv)
+                await rebuildConversationCsv(root, dir, conversation);
+            await clearJsonDirty(channelId, version);
+        }
         return;
     }
 
-    const dir = await resolveConversationDir(root, conversation);
     const version = conversation.contentVersion;
     await rebuildConversationJson(root, dir, conversation);
     if (settings.store.maintainCsv)
@@ -235,23 +256,6 @@ async function drainJson(): Promise<void> {
             } catch (e) {
                 logger.error(`JSON flush failed for ${id}`, e);
                 jsonDirty.add(id);
-            }
-        }
-    }
-}
-
-async function drainAuthors(): Promise<void> {
-    for (let round = 0; round < MAX_DRAIN_ROUNDS && authorDirty.size > 0; round++) {
-        const ids = [...authorDirty];
-        authorDirty.clear();
-        for (const id of ids) {
-            try {
-                const author = await getAuthor(id);
-                if (author)
-                    await rebuildAuthorFiles(root, author);
-            } catch (e) {
-                logger.error(`Author files flush failed for ${id}`, e);
-                authorDirty.add(id);
             }
         }
     }
@@ -283,28 +287,41 @@ function onMessageStored(message: StoredMessage): void {
 
     txtDirty.add(message.channelId);
     jsonDirty.add(message.channelId);
-    if (message.authorId) authorDirty.add(message.authorId);
 
-    if (settings.store.downloadAttachments) {
+    if (settings.store.downloadSelectedAttachments) {
         for (const attachment of message.attachments) {
             if (attachment.downloadState === "pending")
                 enqueueAttachment(root, message, attachment);
         }
     }
 
-    scheduleTxtFlush();
-    // Backfill pages only dirty the sets; their rebuilds are scheduled when the
-    // recovery loop settles, avoiding repeated full rewrites of a growing channel
     if (message.source === "live") {
-        scheduleJsonFlush();
-        scheduleAuthorFlush();
+        liveTxtDirty.add(message.channelId);
+        liveJsonDirty.add(message.channelId);
+        scheduleTxtFlush(TXT_DEBOUNCE_MS);
+        scheduleJsonFlush(JSON_DEBOUNCE_MS);
+    } else {
+        if (!txtSnapshotChannels.has(message.channelId))
+            scheduleTxtFlush(0);
+        if (!jsonSnapshotChannels.has(message.channelId))
+            scheduleJsonFlush(0);
     }
+}
+
+function onMessageChanged(channelId: string): void {
+    txtDirty.add(channelId);
+    jsonDirty.add(channelId);
+    liveTxtDirty.add(channelId);
+    liveJsonDirty.add(channelId);
+    scheduleTxtFlush(TXT_DEBOUNCE_MS);
+    scheduleJsonFlush(JSON_DEBOUNCE_MS);
 }
 
 async function onMessageEdited(channelId: string, messageId: string): Promise<void> {
     statLiveEvents++;
     jsonDirty.add(channelId);
-    scheduleJsonFlush();
+    liveJsonDirty.add(channelId);
+    scheduleJsonFlush(JSON_DEBOUNCE_MS);
     try {
         const message = await getMessage(channelId, messageId);
         if (!message) return;
@@ -319,7 +336,8 @@ async function onMessageEdited(channelId: string, messageId: string): Promise<vo
 async function onMessageDeleted(channelId: string, messageId: string): Promise<void> {
     statLiveEvents++;
     jsonDirty.add(channelId);
-    scheduleJsonFlush();
+    liveJsonDirty.add(channelId);
+    scheduleJsonFlush(JSON_DEBOUNCE_MS);
     try {
         const message = await getMessage(channelId, messageId);
         if (!message) return;
@@ -335,42 +353,31 @@ async function seedPendingWork(): Promise<void> {
     const conversations = await getAllConversations();
     for (const conversation of conversations) {
         txtDirty.add(conversation.id);
-        if (conversation.jsonDirty) jsonDirty.add(conversation.id);
+        jsonDirty.add(conversation.id);
+        jsonSnapshotChannels.delete(conversation.id);
+        txtSnapshotChannels.delete(conversation.id);
     }
-    const authors = await getAllAuthors();
-    for (const author of authors)
-        authorDirty.add(author.id);
 
-    if (settings.store.downloadAttachments) {
-        for (const conversation of conversations) {
-            await iterateChannelMessages(conversation.id, batch => {
-                for (const message of batch) {
-                    for (const attachment of message.attachments) {
-                        if (attachment.downloadState === "pending")
-                            enqueueAttachment(root, message, attachment);
-                    }
-                }
-            }, 200);
-        }
-    }
+    await scanPendingAttachments(root);
 
     scheduleTxtFlush(0);
     scheduleJsonFlush(0);
-    scheduleAuthorFlush(0);
 }
 
 async function runBackfillLoop(): Promise<void> {
-    const attempted = new Set<string>();
-    while (!stopRequested) {
+    const retryAt = new Map<string, number>();
+    while (!stopRequested && settings.store.backfillHistory) {
         try {
             const conversations = await getAllConversations();
             for (const conversation of conversations) {
-                if (stopRequested) break;
-                if (attempted.has(conversation.id)) continue;
-                attempted.add(conversation.id);
+                if (stopRequested || !settings.store.backfillHistory) break;
                 if (conversation.backfillStatus === "complete") continue;
+                if (Date.now() < (retryAt.get(conversation.id) ?? 0)) continue;
 
-                const result = await backfillConversation(conversation.id, () => stopRequested);
+                const result = await backfillConversation(
+                    conversation.id,
+                    () => stopRequested || !settings.store.backfillHistory
+                );
                 statBackfillPages += result.pages;
                 logEvent(root, "backfill_result", {
                     channelId: result.channelId,
@@ -380,24 +387,56 @@ async function runBackfillLoop(): Promise<void> {
                     failures: result.failures,
                     error: result.error ?? null
                 });
-                if (result.outcome === "error")
+                if (result.outcome === "error") {
                     logger.warn(`History recovery failed for ${result.channelId}: ${result.error}`);
+                    const exponent = Math.min(Math.max(result.failures - 1, 0), 4);
+                    const retryInMs = Math.min(60000 * (2 ** exponent), MAX_BACKFILL_RETRY_MS);
+                    retryAt.set(result.channelId, Date.now() + retryInMs);
+                    logEvent(root, "backfill_retry_scheduled", {
+                        channelId: result.channelId,
+                        retryInMs,
+                        failures: result.failures
+                    });
+                } else {
+                    retryAt.delete(result.channelId);
+                }
 
                 // Recovery settled for this channel: unblock its derived files
                 txtDirty.add(conversation.id);
                 jsonDirty.add(conversation.id);
                 scheduleTxtFlush(0);
                 scheduleJsonFlush(0);
-                scheduleAuthorFlush();
             }
         } catch (e) {
             logger.error("History recovery pass failed", e);
             logEvent(root, "backfill_pass_error", { error: e instanceof Error ? e.message : String(e) });
         }
 
-        if (stopRequested) break;
-        await sleep(BACKFILL_RESCAN_MS);
+        let remainingMs = BACKFILL_RESCAN_MS;
+        while (remainingMs > 0 && !stopRequested && settings.store.backfillHistory) {
+            const intervalMs = Math.min(remainingMs, 1000);
+            await sleep(intervalMs);
+            remainingMs -= intervalMs;
+        }
     }
+}
+
+function launchBackfillLoop(): void {
+    if (!running || stopRequested || !settings.store.backfillHistory || backfillLoop)
+        return;
+
+    const loop = runBackfillLoop();
+    backfillLoop = loop;
+    void loop.then(() => {
+        if (backfillLoop === loop)
+            backfillLoop = null;
+        if (running && !stopRequested && settings.store.backfillHistory)
+            launchBackfillLoop();
+    }, e => {
+        if (backfillLoop === loop)
+            backfillLoop = null;
+        logger.error("History recovery loop failed", e);
+    });
 }
 
 async function flushSessionStats(): Promise<void> {
@@ -421,7 +460,6 @@ async function doStop(autoRestart: boolean): Promise<void> {
     if (discoverTimer) { clearTimeout(discoverTimer); discoverTimer = null; }
     if (txtTimer) { clearTimeout(txtTimer); txtTimer = null; }
     if (jsonTimer) { clearTimeout(jsonTimer); jsonTimer = null; }
-    if (authorTimer) { clearTimeout(authorTimer); authorTimer = null; }
     if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
 
     // Drop queued (not started) downloads, then wait for the one in flight so it
@@ -445,7 +483,6 @@ async function doStop(autoRestart: boolean): Promise<void> {
         await enqueueFlush(async () => {
             await drainTxt();
             await drainJson();
-            await drainAuthors();
         });
     } catch (e) {
         logger.error("Final derived flush failed", e);
@@ -472,7 +509,6 @@ async function doStop(autoRestart: boolean): Promise<void> {
             totals: {
                 messages: await countAllMessages(),
                 conversations: conversations.length,
-                authors: await countAuthors(),
                 incompleteBackfills
             },
             countMismatches: mismatches
@@ -527,14 +563,13 @@ export async function startArchiving(): Promise<void> {
         setBackfillLogRoot(root);
         await startSession(root, { pluginVersion: PLUGIN_VERSION, userAgent: navigator.userAgent });
 
-        registerDerivedHooks({ onMessageStored, onMessageEdited, onMessageDeleted });
+        registerDerivedHooks({ onMessageStored, onMessageChanged, onMessageEdited, onMessageDeleted });
         setArchivingActive(true);
 
         await discoverConversations(root);
         await seedPendingWork();
 
-        if (settings.store.backfillHistory)
-            backfillLoop = runBackfillLoop();
+        launchBackfillLoop();
         statsTimer = setInterval(() => { void flushSessionStats(); }, STATS_FLUSH_MS);
 
         logEvent(root, "archiving_started", { storageRoot: root });
@@ -552,6 +587,11 @@ export function handleArchivingToggled(enabled: boolean): Promise<void> {
     return enabled ? startArchiving() : stopArchiving();
 }
 
+export function handleBackfillHistoryChanged(enabled: boolean): void {
+    if (enabled)
+        launchBackfillLoop();
+}
+
 export function handleStorageRootChanged(): void {
     if (!running) return;
     if (rootChangeTimer) clearTimeout(rootChangeTimer);
@@ -562,6 +602,12 @@ export function handleStorageRootChanged(): void {
         if (!configured || configured === root) return;
         void stopArchiving(true); // auto-restart picks up the new folder
     }, ROOT_CHANGE_DEBOUNCE_MS);
+}
+
+export function handleAttachmentGuildsChanged(): void {
+    clearDownloadQueue();
+    if (running && settings.store.downloadSelectedAttachments)
+        void scanPendingAttachments(root).catch(e => logger.error("Attachment rescan failed", e));
 }
 
 export function requestDiscover(): void {

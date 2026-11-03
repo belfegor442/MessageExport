@@ -12,13 +12,13 @@ import {
     getMessageById,
     insertMessagesIfAbsent,
     markMessageDeleted,
-    patchMessage,
     recordEdit,
     recordReactionEvent,
+    updateMessageMetadata,
     upsertConversation,
 } from "./db";
 import { logEvent } from "./events";
-import { emitDeleted, emitEdited, emitStored, isArchivingActive } from "./hooks";
+import { emitChanged, emitDeleted, emitEdited, emitStored, isArchivingActive } from "./hooks";
 import { describeChannelById } from "./registry";
 
 interface MessageCreateEvent { message: any; channelId?: string; }
@@ -86,26 +86,26 @@ export async function handleMessageUpdate(event: MessageUpdateEvent): Promise<vo
     if (!channelId) return;
 
     try {
+        await ensureConversation(channelId);
         const editedTimestamp = message.edited_timestamp ?? message.editedTimestamp ?? null;
-        const newContent = String(message.content ?? "");
         const stored = await getMessage(channelId, messageId);
 
         if (!stored) {
             // Not captured yet (e.g. edited while plugin was off): persist current state as-is
-            await insertMessagesIfAbsent([message], "live");
+            const result = await insertMessagesIfAbsent([message], "live");
+            for (const inserted of result.stored)
+                emitStored(inserted);
             return;
         }
 
-        if (stored.content !== newContent) {
-            await recordEdit(channelId, messageId, newContent, editedTimestamp ? Date.parse(editedTimestamp) : null);
+        if (typeof message.content === "string" && stored.content !== message.content) {
+            await recordEdit(channelId, messageId, message.content, editedTimestamp ? Date.parse(editedTimestamp) : null);
             logEvent(root, "message_edited", { channelId, messageId });
             emitEdited(channelId, messageId);
-        } else if (stored.pinned !== Boolean(message.pinned)) {
-            await patchMessage(channelId, messageId, m => {
-                m.pinned = Boolean(message.pinned);
-                return true;
-            });
         }
+
+        if (await updateMessageMetadata(channelId, messageId, message))
+            emitChanged(channelId);
     } catch (e) {
         logger.error("Failed to process message update", e);
     }
@@ -149,7 +149,9 @@ export async function handleReactionAdd(event: ReactionEvent): Promise<void> {
             typeof event.count === "number" ? event.count : null
         );
         await recordReactionEvent(event.channelId, event.messageId, event.emoji, "add", event.userId ?? null);
-        if (!applied)
+        if (applied)
+            emitChanged(event.channelId);
+        else
             logEvent(root, "reaction_on_unstored", { channelId: event.channelId, messageId: event.messageId });
     } catch (e) {
         logger.error("Failed to process reaction add", e);
@@ -159,7 +161,7 @@ export async function handleReactionAdd(event: ReactionEvent): Promise<void> {
 export async function handleReactionRemove(event: ReactionEvent): Promise<void> {
     if (!isArchivingActive()) return;
     try {
-        await applyReactionState(
+        const applied = await applyReactionState(
             event.channelId,
             event.messageId,
             event.emoji,
@@ -168,6 +170,10 @@ export async function handleReactionRemove(event: ReactionEvent): Promise<void> 
             typeof event.count === "number" ? event.count : null
         );
         await recordReactionEvent(event.channelId, event.messageId, event.emoji, "remove", event.userId ?? null);
+        if (applied)
+            emitChanged(event.channelId);
+        else
+            logEvent(root, "reaction_on_unstored", { channelId: event.channelId, messageId: event.messageId });
     } catch (e) {
         logger.error("Failed to process reaction remove", e);
     }
@@ -176,8 +182,12 @@ export async function handleReactionRemove(event: ReactionEvent): Promise<void> 
 export async function handleReactionRemoveAll(event: ReactionRemoveAllEvent): Promise<void> {
     if (!isArchivingActive()) return;
     try {
-        await clearReactions(event.channelId, event.messageId);
+        const applied = await clearReactions(event.channelId, event.messageId);
         await recordReactionEvent(event.channelId, event.messageId, {}, "clear", null);
+        if (applied)
+            emitChanged(event.channelId);
+        else
+            logEvent(root, "reaction_on_unstored", { channelId: event.channelId, messageId: event.messageId });
     } catch (e) {
         logger.error("Failed to process reaction clear", e);
     }

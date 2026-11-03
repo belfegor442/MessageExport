@@ -1,6 +1,8 @@
-# FASE 1 — Auditoría técnica
+# FASE 1 — Auditoría técnica (snapshot histórico)
 
-Fecha: 2026-11-02 · Rama: `main` · Alcance: inspección completa previa a cualquier modificación.
+Fecha: 2026-11-02 · Rama: `main` · Alcance: inspección previa a la implementación del archivado automático.
+
+> Este documento describe el estado anterior a las fases de implementación; no es una descripción del plugin actual. Para las capacidades actuales, consulta el [README](../README.md) y el código en `src/userplugins/NAChatExporter/`.
 
 ---
 

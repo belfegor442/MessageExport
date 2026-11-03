@@ -10,16 +10,14 @@ import {
     getMessage,
     getMeta,
     getVersions,
-    iterateAuthorMessages,
     iterateChannelMessages,
     setMeta,
-    type StoredAuthor,
     type StoredConversation,
     type StoredMessage,
 } from "../core/db";
 import { Native } from "../utils/nativeBridge";
 import { sanitizeSegment } from "../utils/sanitize";
-import { formatDeletionMarker, formatEditMarker, formatMessageLine, formatTimestamp } from "./format";
+import { formatDeletionMarker, formatEditMarker, formatMessageLine } from "./format";
 
 type Owners = Record<string, string>;
 
@@ -129,6 +127,11 @@ export async function rebuildConversationTxt(root: string, dir: string, conversa
     return last;
 }
 
+function csvCell(value: string | number | boolean): string {
+    const text = String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
+}
+
 export async function rebuildConversationCsv(root: string, dir: string, conversation: StoredConversation): Promise<boolean> {
     const tmpPath = `${dir}/Chat.csv.tmp`;
     await Native.remove(root, tmpPath).catch(() => { });
@@ -140,13 +143,13 @@ export async function rebuildConversationCsv(root: string, dir: string, conversa
             m.channelId,
             new Date(m.timestampMs).toISOString(),
             m.authorId,
-            JSON.stringify(m.authorName),
-            JSON.stringify(m.content),
+            m.authorName,
+            m.content,
             m.edited ? "true" : "false",
             m.deleted ? "true" : "false",
             String(m.attachments.length),
             m.messageReference?.messageId ?? ""
-        ].join(","));
+        ].map(csvCell).join(","));
         if (first) {
             rows.unshift("id,channel_id,timestamp,author_id,author_name,content,edited,deleted,attachment_count,reply_to");
             first = false;
@@ -156,41 +159,4 @@ export async function rebuildConversationCsv(root: string, dir: string, conversa
 
     await Native.rename(root, tmpPath, `${dir}/Chat.csv`);
     return true;
-}
-
-export async function rebuildAuthorFiles(root: string, author: StoredAuthor): Promise<void> {
-    const dir = await claimPath(root, `Users/${sanitizeSegment(author.globalName ?? author.username)}`, author.id);
-    const profile = {
-        id: author.id,
-        username: author.username,
-        globalName: author.globalName,
-        nameHistory: author.nameHistory,
-        firstSeen: new Date(author.firstSeenMs).toISOString(),
-        lastSeen: new Date(author.lastSeenMs).toISOString()
-    };
-    await Native.writeAtomic(root, `${dir}/Profile.json`, JSON.stringify(profile, null, 2));
-
-    const tmpTxt = `${dir}/Chat.txt.tmp`;
-    const tmpJson = `${dir}/Chat.json.tmp`;
-    await Native.remove(root, tmpTxt).catch(() => { });
-    await Native.remove(root, tmpJson).catch(() => { });
-    let firstJson = true;
-
-    await iterateAuthorMessages(author.id, async batch => {
-        const sorted = [...batch].sort((a, b) => a.timestampMs - b.timestampMs || (a.id < b.id ? -1 : 1));
-        const txt = sorted
-            .map(m => `[${formatTimestamp(m.timestampMs)}] ${m.authorName}: ${m.content.replace(/\r?\n/g, " ")}`)
-            .join("\n") + "\n";
-        const chunk = sorted.map(m => JSON.stringify(m)).join(",\n");
-        const prefix = firstJson ? "[\n" : ",\n";
-        firstJson = false;
-        await Promise.all([
-            Native.append(root, tmpTxt, txt),
-            Native.append(root, tmpJson, prefix + chunk)
-        ]);
-    });
-
-    await Native.append(root, tmpJson, firstJson ? "[]\n" : "\n]\n");
-    await Native.rename(root, tmpTxt, `${dir}/Chat.txt`);
-    await Native.rename(root, tmpJson, `${dir}/Chat.json`);
 }

@@ -10,6 +10,7 @@ import { RestAPI } from "@webpack/common";
 import { settings } from "../settings";
 import { logger } from "../utils/logger";
 import {
+    countBackfillMessages,
     getAllConversations,
     getConversation,
     insertMessagesIfAbsent,
@@ -104,12 +105,19 @@ export async function backfillConversation(channelId: string, canAbort: () => bo
     let inserted = 0;
     let skipped = 0;
     let failures = conversation.backfillFailures;
+    let backfillCount = await countBackfillMessages(channelId);
     let outcome: BackfillOutcome = "complete";
     let error: string | undefined;
 
     while (true) {
         if (canAbort()) {
             outcome = "resumable";
+            break;
+        }
+
+        const remaining = maxMessages > 0 ? maxMessages - backfillCount : PAGE_SIZE;
+        if (remaining <= 0) {
+            outcome = "truncated";
             break;
         }
 
@@ -129,11 +137,13 @@ export async function backfillConversation(channelId: string, canAbort: () => bo
         pages++;
         if (page.length === 0) break;
 
-        const persisted = await persistPage(channelId, page);
+        const pageToPersist = page.slice(0, Math.min(remaining, page.length));
+        const persisted = await persistPage(channelId, pageToPersist);
         inserted += persisted.inserted;
         skipped += persisted.skipped;
+        backfillCount += persisted.inserted;
 
-        const oldest = page[page.length - 1];
+        const oldest = pageToPersist[pageToPersist.length - 1];
         if (!oldest?.id || oldest.id === before) {
             failures++;
             outcome = "error";
@@ -143,12 +153,12 @@ export async function backfillConversation(channelId: string, canAbort: () => bo
         before = oldest.id;
         await persistCursor(channelId, before ?? null, "in_progress", failures);
 
-        if (maxMessages > 0 && inserted >= maxMessages) {
+        if (maxMessages > 0 && backfillCount >= maxMessages) {
             outcome = "truncated";
             break;
         }
 
-        if (page.length < PAGE_SIZE) break;
+        if (pageToPersist.length === page.length && page.length < PAGE_SIZE) break;
 
         await sleep(pageDelayMs);
     }

@@ -8,6 +8,7 @@ import type { StoredMessage } from "./db";
 
 export interface DerivedHooks {
     onMessageStored?: (message: StoredMessage) => void;
+    onMessageChanged?: (channelId: string) => void;
     onMessageEdited?: (channelId: string, messageId: string) => void;
     onMessageDeleted?: (channelId: string, messageId: string) => void;
 }
@@ -29,6 +30,10 @@ export function isArchivingActive(): boolean {
 
 export function emitStored(message: StoredMessage): void {
     if (active) hooks.onMessageStored?.(message);
+}
+
+export function emitChanged(channelId: string): void {
+    if (active) hooks.onMessageChanged?.(channelId);
 }
 
 export function emitEdited(channelId: string, messageId: string): void {

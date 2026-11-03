@@ -30,7 +30,6 @@ interface IntegrityReport {
     totals: {
         messages: number;
         conversations: number;
-        authors: number;
         incompleteBackfills: number;
     };
     countMismatches: { channelId: string; stored: number; actual: number; }[];
@@ -95,13 +94,13 @@ export async function startSession(
     root: string,
     info: { pluginVersion: string; userAgent: string; }
 ): Promise<string> {
-    await Native.ensureLayout(root, ["System", "Users", "Conversations/Direct-Messages", "Conversations/Group-Chats", "Conversations/Servers", "Attachments/Images", "Attachments/Videos", "Attachments/Audio", "Attachments/Documents", "Attachments/Stickers", "Attachments/Other", "Voice-Transcripts"]);
+    await Native.ensureLayout(root, ["System", "Conversations/Direct-Messages", "Conversations/Group-Chats", "Conversations/Servers"]);
 
     const descriptor = {
         engine: "indexeddb",
         database: "NAChatExporterArchive",
-        schemaVersion: 1,
-        note: "Logical equivalent of System/archive.db: the primary store of truth is the renderer IndexedDB database named above. TXT/JSON/CSV files are derived exports.",
+        schemaVersion: 4,
+        note: "Messages and conversations are stored in IndexedDB. No per-author profile index is maintained. TXT/JSON/CSV files are derived exports.",
         updatedAt: new Date().toISOString()
     };
     await Native.writeAtomic(root, "System/archive.db", JSON.stringify(descriptor, null, 2));

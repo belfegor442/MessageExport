@@ -6,9 +6,17 @@
 
 import { sleep } from "@utils/misc";
 
-import { setAttachmentState, type StoredAttachment, type StoredMessage } from "../core/db";
+import {
+    getAllConversations,
+    getConversation,
+    iterateChannelMessages,
+    setAttachmentState,
+    type StoredAttachment,
+    type StoredMessage
+} from "../core/db";
 import { logEvent } from "../core/events";
-import { attachmentCategory } from "../derived/writer";
+import { emitChanged } from "../core/hooks";
+import { attachmentCategory, resolveConversationDir } from "../derived/writer";
 import { settings } from "../settings";
 import { logger } from "../utils/logger";
 import { Native } from "../utils/nativeBridge";
@@ -43,7 +51,8 @@ export function getAttachmentStats(): { downloaded: number; failed: number; } {
 }
 
 export function enqueueAttachment(root: string, message: StoredMessage, attachment: StoredAttachment): void {
-    if (attachment.downloadState !== "pending" || !attachment.url) return;
+    if (!settings.store.downloadSelectedAttachments || !getSelectedGuildIds().size
+        || attachment.downloadState !== "pending" || !attachment.url) return;
 
     const key = `${message.channelId}:${message.id}:${attachment.id}`;
     if (queuedKeys.has(key)) return;
@@ -63,7 +72,7 @@ export async function awaitIdleDownloads(): Promise<void> {
 
 async function drain(): Promise<void> {
     while (queue.length > 0) {
-        if (!settings.store.downloadAttachments) {
+        if (!settings.store.downloadSelectedAttachments) {
             clearDownloadQueue();
             break;
         }
@@ -77,39 +86,50 @@ async function drain(): Promise<void> {
 
 async function downloadOne(item: QueueItem): Promise<void> {
     const { root, message, attachment } = item;
-    const base = `Attachments/${attachmentCategory(attachment.contentType, attachment.filename)}`;
     const filename = sanitizeSegment(attachment.filename);
 
     try {
-        const res = await fetch(attachment.url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = new Uint8Array(await res.arrayBuffer());
-        if (data.byteLength === 0) throw new Error("empty response body");
+        if (!settings.store.downloadSelectedAttachments)
+            return;
 
-        let relPath = `${base}/${message.id}-${filename}`;
+        const conversation = await getConversation(message.channelId);
+        if (!settings.store.downloadSelectedAttachments || !conversation?.guildId
+            || !getSelectedGuildIds().has(conversation.guildId))
+            return;
+
+        const conversationDir = await resolveConversationDir(root, conversation);
+        const relPath = `${conversationDir}/Attachments/${attachmentCategory(attachment.contentType, attachment.filename)}/${message.id}-${attachment.id}-${filename}`;
         const existing = await Native.stat(root, relPath).catch(() => null);
-        if (existing)
-            relPath = `${base}/${message.id}-${attachment.id.slice(0, 8)}-${filename}`;
+        if (existing) {
+            const updated = await setAttachmentState(message.channelId, message.id, attachment.id, {
+                localPath: relPath,
+                downloadState: "downloaded"
+            });
+            if (updated) emitChanged(message.channelId);
+            return;
+        }
 
-        await Native.writeBinary(root, relPath, data);
-        await setAttachmentState(message.channelId, message.id, attachment.id, {
+        const bytes = await Native.downloadAttachment(root, relPath, attachment.url);
+        const updated = await setAttachmentState(message.channelId, message.id, attachment.id, {
             localPath: relPath,
             downloadState: "downloaded"
         });
+        if (updated) emitChanged(message.channelId);
         downloaded++;
         logEvent(root, "attachment_downloaded", {
             channelId: message.channelId,
             messageId: message.id,
             attachmentId: attachment.id,
             path: relPath,
-            bytes: data.byteLength
+            bytes
         });
     } catch (e) {
         failed++;
-        await setAttachmentState(message.channelId, message.id, attachment.id, {
+        const updated = await setAttachmentState(message.channelId, message.id, attachment.id, {
             localPath: null,
             downloadState: "failed"
         }).catch(() => { });
+        if (updated) emitChanged(message.channelId);
         logEvent(root, "attachment_failed", {
             channelId: message.channelId,
             messageId: message.id,
@@ -117,5 +137,32 @@ async function downloadOne(item: QueueItem): Promise<void> {
             error: e instanceof Error ? e.message : String(e)
         });
         logger.warn(`Attachment download failed for ${attachment.filename}`, e);
+    }
+}
+
+function getSelectedGuildIds(): Set<string> {
+    return new Set(
+        settings.store.attachmentGuildIds
+            .split(",")
+            .map(id => id.trim())
+            .filter(Boolean)
+    );
+}
+
+export async function scanPendingAttachments(root: string): Promise<void> {
+    if (!settings.store.downloadSelectedAttachments || !getSelectedGuildIds().size) {
+        clearDownloadQueue();
+        return;
+    }
+
+    const selectedGuildIds = getSelectedGuildIds();
+    for (const conversation of await getAllConversations()) {
+        if (!conversation.guildId || !selectedGuildIds.has(conversation.guildId)) continue;
+        await iterateChannelMessages(conversation.id, batch => {
+            for (const message of batch) {
+                for (const attachment of message.attachments)
+                    enqueueAttachment(root, message, attachment);
+            }
+        }, 200);
     }
 }

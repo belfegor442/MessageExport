@@ -1,106 +1,73 @@
 # NA Chat Exporter
 
-A private [Vencord](https://vencord.dev) user plugin that exports Discord conversations **message by message** with full metadata and an explicit integrity manifest — an incomplete export is never presented as complete.
+A private [Vencord](https://vencord.dev) user plugin that automatically archives accessible Discord conversations to local files. IndexedDB is the source of truth; TXT, JSON and optional CSV files are derived exports.
 
-> **Status:** active development. Phase 5 complete — JSON export of the currently open conversation works end to end. HTML / CSV / TXT formatters and the export dialog are planned next.
+## Features
 
-## What it does
+- Captures new messages, edits, deletions, reactions and observable voice-state changes while the plugin is active.
+- Discovers accessible DMs, group DMs, guild text channels, announcement channels and cached threads.
+- Optionally recovers accessible message history through Discord's internal REST API:
+  - fetches up to 100 messages per page, with a configurable delay
+  - waits for the server-provided retry delay on HTTP 429 responses
+  - persists pagination cursors so interrupted recovery can resume
+  - supports a per-conversation cap on messages recovered by backfill
+- Stores messages and edit/reaction history in IndexedDB. Derived files are written under the configured local folder:
+  - `Conversations/Servers/<server>/Channels/<channel>/` — conversation TXT/JSON/optional CSV and `Attachments/<type>/`
+  - `Conversations/Direct-Messages/<conversation>/` and `Group-Chats/<conversation>/` — conversation logs
+  - `System/` — session, event and integrity logs
+- Writes live TXT updates within about 100 ms and refreshes JSON shortly after; historical backfill is batched separately.
+- Backfill can be toggled while archiving is running; temporary failures are retried with increasing delays, up to 15 minutes.
+- Stores display names on each message; it does not create per-user profiles, folders, or a database of all authors.
 
-- Exports the **currently open conversation** (guild text/announcement channels, threads, DMs and group DMs) to a JSON file via the native save dialog.
-- Collects history through Discord's internal REST API (`GET /channels/{id}/messages`), **not** the client cache:
-  - paginates backwards with a `before` cursor, 100 messages per page
-  - configurable delay between requests (default 500 ms) — gentle on Discord
-  - on HTTP 429 it **waits** the server-provided `retry_after` and retries (up to 3 attempts); no rate-limit evasion
-  - deduplicates messages across page boundaries and stalls safely if the cursor stops advancing
-  - optional safety cap (`maxMessages`, 0 = unlimited)
-- Writes messages **raw and lossless** (exactly as returned by the API), oldest → newest, plus an integrity block.
-
-### Integrity manifest
-
-```json
-{
-  "schema": "na-chat-export/1",
-  "generatedAt": "2026-11-01T12:00:00.000Z",
-  "conversation": { "id": "...", "name": "...", "type": 0, "guildId": "...", "guildName": "...", "isDM": false },
-  "integrity": {
-    "status": "complete | truncated | partial",
-    "stopReason": "reached_beginning | max_messages | error",
-    "pagesFetched": 12,
-    "failedFetches": 0,
-    "deduplicatedMessages": 0,
-    "messageCount": 1137,
-    "newestId": "...",
-    "oldestId": "...",
-    "error": null
-  },
-  "messages": [ /* raw Discord API message objects */ ]
-}
-```
-
-- `complete` — pagination reached the beginning of the channel with **zero** failed requests.
-- `truncated` — stopped at your `maxMessages` cap (exports the most recent N messages).
-- `partial` — at least one page failed after retries; the export is explicitly flagged as incomplete.
+Archiving is local to the device and requires Vencord's desktop native filesystem bridge. Only data available to the Discord account is captured; messages or events unavailable during downtime cannot be guaranteed.
 
 ## Installation
 
-This is a **user plugin** — it is discovered automatically by Vencord's build, no registration needed.
+This is a Vencord user plugin. Copy `src/userplugins/NAChatExporter` into the Vencord checkout's `src/userplugins/` directory, then build Vencord:
 
-1. Clone this repository into your Vencord checkout's `src/userplugins/` folder (or copy the `src/userplugins/NAChatExporter` folder there):
+```powershell
+Copy-Item -Recurse -Force src\userplugins\NAChatExporter <vencord>\src\userplugins\NAChatExporter
+Set-Location <vencord>
+pnpm build --dev
+```
 
-   ```powershell
-   git clone https://github.com/belfegor442/MessageExport.git <vencord>/src/userplugins/MessageExport
-   ```
+Restart Discord and enable **NA Chat Exporter** under **Settings → Vencord → Plugins**.
 
-2. Build Vencord (from the Vencord repo root):
-
-   ```powershell
-   pnpm build --dev
-   ```
-
-3. Restart Discord completely (tray → Quit, then reopen).
-
-4. Enable it: **Settings ⚙ → Vencord → Plugins → NA Chat Exporter**.
-
-## Usage
-
-1. Open the conversation you want to export.
-2. **Settings ⚙ → Vencord → Plugins → NA Chat Exporter → "Export current conversation (JSON)"**.
-3. Choose where to save the file.
-
-Settings:
+## Settings
 
 | Setting | Default | Purpose |
-|---|---|---|
-| `pageDelayMs` | 500 | Delay between history requests (100–2000 ms) |
-| `maxMessages` | 0 | Safety cap per export (0 = no limit) |
-| `defaultFormat` | JSON | Preselected format for the (planned) export dialog |
+|---|---:|---|
+| `archivingEnabled` | `true` | Start or stop automatic archiving |
+| `storageRoot` | `D:/NA-CHAT-EXPORTER` | Local folder for the archive |
+| `backfillHistory` | `true` | Recover history still accessible through Discord |
+| `downloadSelectedAttachments` | `false` | Download attachments only after enabling this and selecting servers below |
+| `attachmentGuildIds` | none | Per-server allowlist for attachment downloads; no server is selected by default |
+| `maintainCsv` | `false` | Maintain an additional CSV export |
+| `pageDelayMs` | `500` | Delay between backfill requests |
+| `maxMessages` | `0` | Maximum backfilled messages per conversation; `0` means unlimited |
 
 ## Development
 
-The canonical source lives in this repository; it is copied into a local Vencord checkout for building:
+The canonical source is `src/userplugins/NAChatExporter`. Copy it to the Vencord checkout before validating changes:
 
 ```powershell
-# from the workspace root
 Copy-Item -Recurse -Force src\userplugins\NAChatExporter vencord\src\userplugins\NAChatExporter
-
-# gates (from the vencord folder)
-pnpm test:ts                                  # typecheck
-pnpm exec eslint src/userplugins/NAChatExporter # lint
-pnpm build --dev                              # build
-pnpm test                                     # full suite
+Set-Location vencord
+pnpm test:ts
+pnpm exec eslint src/userplugins/NAChatExporter
+pnpm build --dev
 ```
 
-Then restart Discord and check the plugin log in the console (`NAChatExporter: ...`).
+## Privacy and limitations
 
-## Security & privacy
-
-- **Local only** — exports never leave your machine; the plugin performs no uploads.
-- **No token access** — the token is never read or logged.
-- **No selfbot / spam / rate-limit evasion** — requests are paced and rate limits are respected by waiting.
-- Standard Discord client APIs only (Vencord plugin APIs + Discord's internal REST client).
+- The plugin does not upload archive data or read the Discord token.
+- The database migration removes its old author index/store; any old `Users/` folder is left untouched and is no longer written.
+- Backfill and live capture use Discord client APIs and respect server rate limits.
+- Backfill can only retrieve history Discord makes accessible to the account.
+- Attachments are never downloaded from DMs or unselected servers. Existing files in old paths are left untouched and are not moved or deleted.
+- Events occurring while Discord or the plugin is stopped are not captured live; history recovery may fill some message gaps if those messages remain accessible.
+- This is a private user plugin, not affiliated with Discord or Vencord.
 
 ## License
 
-GPL-3.0-or-later — see [LICENSE](LICENSE). Every source file carries the license header.
-
-Not affiliated with Discord, Vencord or Vendicated.
+GPL-3.0-or-later; see [LICENSE](LICENSE).
